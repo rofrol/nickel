@@ -1,7 +1,7 @@
 //! Define the main evaluation stack of the Nickel abstract machine and related operations.
 //!
 //! See [eval](../eval/index.html).
-use crate::eval::{Closure, Environment, IdentKind, Thunk, ThunkUpdateFrame};
+use crate::eval::{Closure, Environment, IdentKind, StdThunkData, Thunk, ThunkUpdateFrame};
 use crate::operation::OperationCont;
 use crate::position::TermPos;
 use crate::term::{RichTerm, StrChunk};
@@ -24,7 +24,7 @@ pub enum Marker {
     /// In particular, contract arguments are tracked, in order to report the actual, evaluated offending term in case of blame.
     TrackedArg(Thunk, TermPos),
     /// A thunk, which is pointer to a mutable memory cell to be updated.
-    Thunk(ThunkUpdateFrame),
+    Thunk(ThunkUpdateFrame<StdThunkData>),
     /// The continuation of a primitive operation.
     Cont(
         OperationCont,
@@ -139,7 +139,7 @@ impl Stack {
         self.0.push(Marker::TrackedArg(arg_thunk, pos))
     }
 
-    pub fn push_thunk(&mut self, thunk: ThunkUpdateFrame) {
+    pub fn push_thunk(&mut self, thunk: ThunkUpdateFrame<StdThunkData>) {
         self.0.push(Marker::Thunk(thunk))
     }
 
@@ -206,7 +206,7 @@ impl Stack {
 
     /// Try to pop a thunk from the top of the stack. If `None` is returned, the top element was
     /// not a thunk and the stack is left unchanged.
-    pub fn pop_thunk(&mut self) -> Option<ThunkUpdateFrame> {
+    pub fn pop_thunk(&mut self) -> Option<ThunkUpdateFrame<StdThunkData>> {
         match self.0.pop() {
             Some(Marker::Thunk(thunk)) => Some(thunk),
             Some(m) => {

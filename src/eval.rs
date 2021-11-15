@@ -95,7 +95,7 @@ use crate::operation::{continuate_operation, OperationCont};
 use crate::position::TermPos;
 use crate::stack::Stack;
 use crate::term::{make as mk_term, BinaryOp, MetaValue, RichTerm, StrChunk, Term, UnaryOp};
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Ref, RefCell};
 use std::rc::{Rc, Weak};
 
 /// The state of a thunk.
@@ -114,19 +114,82 @@ pub enum ThunkState {
     Evaluated,
 }
 
+trait ThunkData {
+    fn new(closure: Closure) -> Self;
+
+    fn state(&self) -> ThunkState;
+    fn set_state(&mut self, state: ThunkState);
+
+    fn closure(&self) -> &Closure;
+    fn update(&mut self, closure: Closure);
+    fn consume(self) -> Closure;
+}
+
 /// The mutable data stored inside a thunk.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ThunkData {
+pub struct StdThunkData {
     closure: Closure,
     state: ThunkState,
 }
 
-impl ThunkData {
-    pub fn new(closure: Closure) -> Self {
-        ThunkData {
+impl ThunkData for StdThunkData {
+    fn new(closure: Closure) -> Self {
+        StdThunkData {
             closure,
             state: ThunkState::Suspended,
         }
+    }
+
+    fn state(&self) -> ThunkState {
+        self.state
+    }
+    fn set_state(&mut self, state: ThunkState) {
+        self.state = state
+    }
+
+    fn closure(&self) -> &Closure {
+        &self.closure
+    }
+    fn update(&mut self, closure: Closure) {
+        self.closure = closure
+    }
+    fn consume(self) -> Closure {
+        self.closure
+    }
+}
+
+/// The mutable data stored inside a reversible thunk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RevThunkData {
+    original: Closure,
+    cached: Option<Closure>,
+    state: ThunkState,
+}
+
+impl ThunkData for RevThunkData {
+    fn new(closure: Closure) -> Self {
+        RevThunkData {
+            original: closure,
+            cached: None,
+            state: ThunkState::Suspended,
+        }
+    }
+
+    fn state(&self) -> ThunkState {
+        self.state
+    }
+    fn set_state(&mut self, state: ThunkState) {
+        self.state = state
+    }
+
+    fn closure(&self) -> &Closure {
+        (self.cached.as_ref()).unwrap_or(&self.original)
+    }
+    fn update(&mut self, closure: Closure) {
+        self.cached.insert(closure);
+    }
+    fn consume(self) -> Closure {
+        self.cached.unwrap_or(self.original)
     }
 }
 
@@ -134,9 +197,12 @@ impl ThunkData {
 ///
 /// A thunk is a shared suspended computation. It is the primary device for the implementation of
 /// lazy evaluation.
+///
+/// This thunk is generic in the sense that it can contain either a standard thunk or a reversible
+/// thunk.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Thunk {
-    data: Rc<RefCell<ThunkData>>,
+pub struct GenericThunk<D: ThunkData> {
+    data: Rc<RefCell<D>>,
     ident_kind: IdentKind,
 }
 
@@ -144,31 +210,31 @@ pub struct Thunk {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlackholedError;
 
-impl Thunk {
+impl<D: ThunkData> GenericThunk<D> {
     pub fn new(closure: Closure, ident_kind: IdentKind) -> Self {
-        Thunk {
+        GenericThunk {
             data: Rc::new(RefCell::new(ThunkData::new(closure))),
             ident_kind,
         }
     }
 
     pub fn state(&self) -> ThunkState {
-        self.data.borrow().state
+        self.data.borrow().state()
     }
 
     /// Set the state to evaluated.
     pub fn set_evaluated(&mut self) {
-        self.data.borrow_mut().state = ThunkState::Evaluated;
+        self.data.borrow_mut().set_state(ThunkState::Evaluated);
     }
 
     /// Generate an update frame from this thunk and set the state to `Blackholed`. Return an
     /// error if the thunk was already black-holed.
-    pub fn mk_update_frame(&mut self) -> Result<ThunkUpdateFrame, BlackholedError> {
-        if self.data.borrow().state == ThunkState::Blackholed {
+    pub fn mk_update_frame(&mut self) -> Result<ThunkUpdateFrame<D>, BlackholedError> {
+        if self.data.borrow().state() == ThunkState::Blackholed {
             return Err(BlackholedError);
         }
 
-        self.data.borrow_mut().state = ThunkState::Blackholed;
+        self.data.borrow_mut().set_state(ThunkState::Blackholed);
 
         Ok(ThunkUpdateFrame {
             data: Rc::downgrade(&self.data),
@@ -178,33 +244,15 @@ impl Thunk {
 
     /// Immutably borrow the inner closure. Panic if there is another active mutable borrow.
     pub fn borrow(&self) -> Ref<'_, Closure> {
-        let (closure, _) = Ref::map_split(self.data.borrow(), |data| {
-            let ThunkData {
-                ref closure,
-                ref state,
-            } = data;
-            (closure, state)
-        });
-
-        closure
-    }
-
-    /// Mutably borrow the inner closure. Panic if there is any other active borrow.
-    pub fn borrow_mut(&mut self) -> RefMut<'_, Closure> {
-        let (closure, _) = RefMut::map_split(self.data.borrow_mut(), |data| {
-            let ThunkData {
-                ref mut closure,
-                ref mut state,
-            } = data;
-            (closure, state)
-        });
+        let (closure, _) =
+            Ref::map_split(self.data.borrow(), |data| (data.closure(), &data.state()));
 
         closure
     }
 
     /// Get an owned clone of the inner closure.
     pub fn get_owned(&self) -> Closure {
-        self.data.borrow().closure.clone()
+        self.data.borrow().closure().clone()
     }
 
     pub fn ident_kind(&self) -> IdentKind {
@@ -215,8 +263,8 @@ impl Thunk {
     /// reference to the inner closure.
     pub fn into_closure(self) -> Closure {
         match Rc::try_unwrap(self.data) {
-            Ok(inner) => inner.into_inner().closure,
-            Err(rc) => rc.borrow().clone().closure,
+            Ok(inner) => inner.into_inner().consume(),
+            Err(rc) => rc.borrow().closure().clone(),
         }
     }
 }
@@ -228,12 +276,12 @@ impl Thunk {
 /// holds a weak reference to the inner closure, to avoid unnecessarily keeping the underlying
 /// closure alive.
 #[derive(Clone, Debug)]
-pub struct ThunkUpdateFrame {
-    data: Weak<RefCell<ThunkData>>,
+pub struct ThunkUpdateFrame<D: ThunkData> {
+    data: Weak<RefCell<D>>,
     ident_kind: IdentKind,
 }
 
-impl ThunkUpdateFrame {
+impl<D: ThunkData> ThunkUpdateFrame<D> {
     /// Update the corresponding thunk with a closure. Set the state to `Evaluated`
     ///
     /// # Return
@@ -242,16 +290,17 @@ impl ThunkUpdateFrame {
     /// - `false` if the corresponding closure has been dropped since
     pub fn update(self, closure: Closure) -> bool {
         if let Some(data) = Weak::upgrade(&self.data) {
-            *data.borrow_mut() = ThunkData {
-                closure,
-                state: ThunkState::Evaluated,
-            };
+            let data_mut = data.borrow_mut();
+            data_mut.update(closure);
+            data_mut.set_state(ThunkState::Evaluated);
             true
         } else {
             false
         }
     }
 }
+
+pub type Thunk = GenericThunk<StdThunkData>;
 
 /// A call stack, saving the history of function calls.
 ///
@@ -669,11 +718,18 @@ where
                             // We already checked for unbound identifier in the previous fold,
                             // so function should always succeed
                             let mut thunk = env.get(&var_id).unwrap();
-                            thunk.borrow_mut().env.extend(
+
+                            // The following code is doing useless cloning. This is temporary. Will
+                            // be removed at the end of the implementation of overriding.
+                            let mut thunk_closure = thunk.get_owned();
+                            thunk_closure.env.extend(
                                 rec_env
                                     .iter_elems()
                                     .map(|(id, thunk)| (id.clone(), thunk.clone())),
                             );
+                            // We just created the thunk above, so it can't be blackholed.
+                            thunk.mk_update_frame().unwrap().update(thunk_closure);
+
                             (
                                 id,
                                 RichTerm {
