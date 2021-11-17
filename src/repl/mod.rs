@@ -11,7 +11,7 @@ use crate::error::{Error, EvalError, IOError, ParseError, REPLError};
 use crate::identifier::Ident;
 use crate::parser::{grammar, lexer, ExtendedTerm};
 use crate::term::{RichTerm, Term};
-use crate::types::Types;
+use crate::types::{TypeAliasEnv, Types};
 use crate::{eval, transformations, typecheck};
 use codespan::FileId;
 use simple_counter::*;
@@ -119,7 +119,7 @@ impl REPLImpl {
 
         match self
             .parser
-            .parse(file_id, lexer::Lexer::new(exp))
+            .parse(file_id, &mut TypeAliasEnv::new(), lexer::Lexer::new(exp))
             .map_err(|err| ParseError::from_lalrpop(err, file_id))?
         {
             // Because we don't use the cache for input, we have to perform recursive import
@@ -302,7 +302,11 @@ impl InputParser {
 
         let result = self
             .parser
-            .parse(self.file_id, lexer::Lexer::new(input))
+            .parse(
+                self.file_id,
+                &mut TypeAliasEnv::new(),
+                lexer::Lexer::new(input),
+            )
             .map_err(|err| ParseError::from_lalrpop(err, self.file_id));
 
         match result {

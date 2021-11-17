@@ -150,7 +150,7 @@
           "2ab96390c7dbe3439de74d0c9b0b1767"
       ```
       "#m
-    = fun type s => %hash% type s,
+    = fun hashtype s => %hash% hashtype s,
 
     serialize : <Json, Toml, Yaml> -> Dyn -> Str
     | doc m#"

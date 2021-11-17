@@ -868,6 +868,7 @@ pub fn subst(rt: RichTerm, global_env: &Environment, env: &Environment) -> RichT
             | v @ Term::Var(_)
             | v @ Term::Enum(_)
             | v @ Term::Import(_)
+            | v @ Term::TypeAlias(..)
             | v @ Term::ResolvedImport(_) => RichTerm::new(v, pos),
             Term::Let(id, t1, t2) => {
                 let t1 = subst_(t1, global_env, env, Cow::Borrowed(bound.as_ref()));
@@ -1047,6 +1048,7 @@ mod tests {
     use crate::term::make as mk_term;
     use crate::term::{BinaryOp, StrChunk, UnaryOp};
     use crate::transformations::resolve_imports;
+    use crate::types::TypeAliasEnv;
     use crate::{mk_app, mk_fun};
     use codespan::Files;
 
@@ -1059,7 +1061,7 @@ mod tests {
         let id = Files::new().add("<test>", String::from(s));
 
         grammar::TermParser::new()
-            .parse(id, lexer::Lexer::new(&s))
+            .parse(id, &mut TypeAliasEnv::new(), lexer::Lexer::new(&s))
             .map(|mut t| {
                 t.clean_pos();
                 t

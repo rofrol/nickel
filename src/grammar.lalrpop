@@ -15,12 +15,12 @@ use crate::parser::error::ParseError;
 use crate::term::{BinaryOp, RichTerm, Term, UnaryOp, StrChunk, MetaValue,
     MergePriority, Contract, NAryOp, RecordAttrs};
 use crate::term::make as mk_term;
-use crate::types::{Types, AbsType};
+use crate::types::{Types, AbsType, TypeAliasEnv};
 
-grammar<'input>(src_id: FileId);
+grammar<'input>(src_id: FileId, typeenv: &mut TypeAliasEnv);
 
 WithPos<Rule>: RichTerm = <l: @L> <t: Rule> <r: @R> => t.with_pos(mk_pos(src_id, l, r));
-CheckUnbound<Rule>: Types = <l: @L> <t: Rule> <r: @R> =>? check_unbound(&t, mk_span(src_id, l, r)).map_err(|e| lalrpop_util::ParseError::User{error: e}).and(Ok(t));
+CheckUnbound<Rule>: Types = <l: @L> <t: Rule> <r: @R> =>? check_unbound(&t, mk_span(src_id, l, r), &typeenv).map_err(|e| lalrpop_util::ParseError::User{error: e}).and(Ok(t));
 
 TypeAnnot: MetaValue = ":" <l: @L> <ty_res: CheckUnbound<Types>> <r: @R> => MetaValue {
     doc: None,
@@ -87,6 +87,11 @@ pub ExtendedTerm: ExtendedTerm = {
 }
 
 RootTerm: RichTerm = {
+    "let" "type" <id:Ident> "=" <ty: Types> "in" <rest: Term> => {
+        typeenv.insert(id.clone(), ty.clone());
+        mk_term::let_in(id.clone(), Term::TypeAlias(id, ty), rest)
+    },
+
     "let" <id:Ident> <meta: Annot?> "=" <t1: Term> "in"
         <t2: Term> => {
         let t1 = if let Some(mut meta) = meta {
@@ -536,6 +541,7 @@ extern {
         "multstr literal" => Token::MultiStr(MultiStringToken::Literal(<&'input str>)),
         "num literal" => Token::Normal(NormalToken::NumLiteral(<f64>)),
 
+        "type" => Token::Normal(NormalToken::TypeDef),
         "if" => Token::Normal(NormalToken::If),
         "then" => Token::Normal(NormalToken::Then),
         "else" => Token::Normal(NormalToken::Else),

@@ -51,12 +51,15 @@
 //! otherwise.  Contract checks are introduced by `Promise` and `Assume` blocks or alternatively by
 //! enriched values `Contract` or `ContractDefault`. They ensure sane interaction between typed and
 //! untyped parts.
+use crate::environment::Environment as GenericEnvironment;
 use crate::identifier::Ident;
 use crate::term::make as mk_term;
 use crate::term::{BinaryOp, RichTerm, Term, UnaryOp};
 use crate::{mk_app, mk_fun};
 use std::collections::HashMap;
 use std::fmt;
+
+pub type TypeAliasEnv = GenericEnvironment<Ident, Types>;
 
 /// A Nickel type.
 #[derive(Clone, PartialEq, Debug)]
@@ -159,7 +162,8 @@ impl Types {
     /// Wrapper for [`contract_open`](fn.contract_open.html).
     pub fn contract(&self) -> RichTerm {
         let mut sy = 0;
-        self.contract_open(HashMap::new(), true, &mut sy)
+        let mut typeenv = TypeAliasEnv::new();
+        self.contract_open(HashMap::new(), true, &mut sy, &mut typeenv)
     }
 
     /// Return the contract corresponding to a type.
@@ -177,6 +181,7 @@ impl Types {
         mut h: HashMap<Ident, (RichTerm, RichTerm)>,
         pol: bool,
         sy: &mut i32,
+        typeenv: &mut TypeAliasEnv,
     ) -> RichTerm {
         use crate::stdlib::contracts;
         use crate::transformations::fresh_var;
@@ -188,12 +193,14 @@ impl Types {
             AbsType::Str() => contracts::string(),
             //TODO: optimization: have a specialized contract for `List Dyn`, to avoid mapping an
             //always successful contract on each element.
-            AbsType::List(ref ty) => mk_app!(contracts::list(), ty.contract_open(h, pol, sy)),
+            AbsType::List(ref ty) => {
+                mk_app!(contracts::list(), ty.contract_open(h, pol, sy, typeenv))
+            }
             AbsType::Sym() => panic!("Are you trying to check a Sym at runtime?"),
             AbsType::Arrow(ref s, ref t) => mk_app!(
                 contracts::func(),
-                s.contract_open(h.clone(), !pol, sy),
-                t.contract_open(h, pol, sy)
+                s.contract_open(h.clone(), !pol, sy, typeenv),
+                t.contract_open(h, pol, sy, typeenv)
             ),
             AbsType::Flat(ref t) => t.clone(),
             AbsType::Var(ref i) => {
@@ -209,7 +216,7 @@ impl Types {
 
                 h.insert(i.clone(), (inst_var, inst_tail));
                 *sy += 1;
-                t.contract_open(h, pol, sy)
+                t.contract_open(h, pol, sy, typeenv)
             }
             AbsType::RowEmpty() | AbsType::RowExtend(_, _, _) => contracts::fail(),
             AbsType::Enum(ref r) => {
@@ -255,6 +262,7 @@ impl Types {
                     pol: bool,
                     ty: &Types,
                     h: HashMap<Ident, (RichTerm, RichTerm)>,
+                    typeenv: &mut TypeAliasEnv,
                 ) -> RichTerm {
                     match &ty.0 {
                         AbsType::RowEmpty() => contracts::empty_tail(),
@@ -266,8 +274,8 @@ impl Types {
                             rt.clone()
                         }
                         AbsType::RowExtend(id, Some(ty), rest) => {
-                            let cont = form(sy, pol, rest.as_ref(), h.clone());
-                            let row_contr = ty.contract_open(h, pol, sy);
+                            let cont = form(sy, pol, rest.as_ref(), h.clone(), typeenv);
+                            let row_contr = ty.contract_open(h, pol, sy, typeenv);
                             mk_app!(
                                 contracts::record_extend(),
                                 mk_term::string(format!("{}", id)),
@@ -282,10 +290,13 @@ impl Types {
                     }
                 }
 
-                mk_app!(contracts::record(), form(sy, pol, ty, h))
+                mk_app!(contracts::record(), form(sy, pol, ty, h, typeenv))
             }
             AbsType::DynRecord(ref ty) => {
-                mk_app!(contracts::dyn_record(), ty.contract_open(h, pol, sy))
+                mk_app!(
+                    contracts::dyn_record(),
+                    ty.contract_open(h, pol, sy, typeenv)
+                )
             }
         };
 
@@ -418,6 +429,7 @@ mod test {
     use crate::parser::grammar::TermParser;
     use crate::parser::lexer::Lexer;
     use crate::term::Term;
+    use crate::types::TypeAliasEnv;
     use codespan::Files;
 
     /// Parse a type represented as a string.
@@ -429,7 +441,9 @@ mod test {
         println!("{}", wrapper);
         let id = Files::new().add("<test>", wrapper.clone());
 
-        let rt = TermParser::new().parse(id, Lexer::new(&wrapper)).unwrap();
+        let rt = TermParser::new()
+            .parse(id, &mut TypeAliasEnv::new(), Lexer::new(&wrapper))
+            .unwrap();
 
         match *rt.term {
             Term::MetaValue(MetaValue { mut contracts, .. }) if contracts.len() == 1 => {

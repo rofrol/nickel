@@ -10,7 +10,7 @@ use crate::mk_app;
 use crate::parser::error::ParseError;
 use crate::position::{RawSpan, TermPos};
 use crate::term::{make as mk_term, BinaryOp, RecordAttrs, RichTerm, StrChunk, Term};
-use crate::types::{AbsType, Types};
+use crate::types::{AbsType, TypeAliasEnv, Types};
 
 /// Distinguish between the standard string separators `"`/`"` and the multi-line string separators
 /// `m#"`/`"#m` in the parser.
@@ -397,17 +397,23 @@ pub fn strip_indent_doc(doc: String) -> String {
 }
 
 /// Recursively checks for unbound type variables in a type
-pub fn check_unbound(types: &Types, span: RawSpan) -> Result<(), ParseError> {
+pub fn check_unbound(
+    types: &Types,
+    span: RawSpan,
+    typeenv: &TypeAliasEnv,
+) -> Result<(), ParseError> {
     // heavy lifting function, recurses into a type expression and returns a set of unbound vars
-    fn find_unbound_vars(types: &Types, unbound_set: &mut HashSet<Ident>) {
+    fn find_unbound_vars(types: &Types, typeenv: &TypeAliasEnv, unbound_set: &mut HashSet<Ident>) {
         match &types.0 {
             AbsType::Var(ident) => {
-                unbound_set.insert(ident.clone());
+                if let Some(_) = typeenv.get(ident) {
+                    unbound_set.insert(ident.clone());
+                }
             }
             AbsType::Forall(ident, ty) => {
                 // forall needs a "scoped" set for the variables in its nodes
                 let mut forall_unbound_vars = HashSet::new();
-                find_unbound_vars(&ty, &mut forall_unbound_vars);
+                find_unbound_vars(&ty, typeenv, &mut forall_unbound_vars);
 
                 forall_unbound_vars.remove(ident);
 
@@ -416,21 +422,21 @@ pub fn check_unbound(types: &Types, span: RawSpan) -> Result<(), ParseError> {
                 unbound_set.extend(forall_unbound_vars);
             }
             AbsType::Arrow(s, t) => {
-                find_unbound_vars(&s, unbound_set);
-                find_unbound_vars(&t, unbound_set);
+                find_unbound_vars(&s, typeenv, unbound_set);
+                find_unbound_vars(&t, typeenv, unbound_set);
             }
             AbsType::DynRecord(ty)
             | AbsType::StaticRecord(ty)
             | AbsType::List(ty)
             | AbsType::Enum(ty) => {
-                find_unbound_vars(&ty, unbound_set);
+                find_unbound_vars(&ty, typeenv, unbound_set);
             }
             AbsType::RowExtend(_, opt_ty, ty) => {
                 if let Some(ty) = opt_ty {
-                    find_unbound_vars(&ty, unbound_set);
+                    find_unbound_vars(&ty, typeenv, unbound_set);
                 }
 
-                find_unbound_vars(&ty, unbound_set);
+                find_unbound_vars(&ty, typeenv, unbound_set);
             }
             AbsType::Dyn()
             | AbsType::Bool()
@@ -445,7 +451,7 @@ pub fn check_unbound(types: &Types, span: RawSpan) -> Result<(), ParseError> {
     let mut unbound_set: HashSet<Ident> = HashSet::new();
 
     // recurse into type and find unbound type vars
-    find_unbound_vars(&types, &mut unbound_set);
+    find_unbound_vars(&types, typeenv, &mut unbound_set);
 
     if !unbound_set.is_empty() {
         return Err(ParseError::UnboundTypeVariables(

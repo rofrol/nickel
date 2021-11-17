@@ -48,7 +48,7 @@ use crate::identifier::Ident;
 use crate::label::ty_path;
 use crate::position::TermPos;
 use crate::term::{BinaryOp, Contract, MetaValue, NAryOp, RichTerm, StrChunk, Term, UnaryOp};
-use crate::types::{AbsType, Types};
+use crate::types::{AbsType, TypeAliasEnv, Types};
 use crate::{mk_tyw_arrow, mk_tyw_enum, mk_tyw_enum_row, mk_tyw_record, mk_tyw_row};
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -482,6 +482,7 @@ where
             false,
             t,
             ty.clone(),
+            &mut TypeAliasEnv::new(),
         )?;
     }
 
@@ -521,6 +522,7 @@ pub fn type_check_in_env(
         false,
         t,
         ty.clone(),
+        &mut TypeAliasEnv::new(),
     )?;
 
     Ok(to_type(&state.table, ty))
@@ -548,6 +550,7 @@ fn type_check_<S, E>(
     strict: bool,
     rt: &RichTerm,
     ty: TypeWrapper,
+    typeenv: &mut TypeAliasEnv,
 ) -> Result<(), TypecheckError> {
     let RichTerm { term: t, pos } = rt;
     linearizer.add_term(lin, t, *pos, ty.clone());
@@ -572,10 +575,14 @@ fn type_check_<S, E>(
                     match chunk {
                         StrChunk::Literal(_) => Ok(()),
                         StrChunk::Expr(t, _) => {
-                            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, mk_typewrapper::str())
+                            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, mk_typewrapper::str(), typeenv)
                         }
                     }
                 })
+        }
+        Term::TypeAlias(ident, tyal) => {
+            typeenv.insert(ident.clone(), tyal.clone());
+            Ok(())
         }
         Term::Fun(x, t) => {
             let src = TypeWrapper::Ptr(new_var(state.table));
@@ -588,7 +595,7 @@ fn type_check_<S, E>(
             unify(state, strict, ty, arr).map_err(|err| err.into_typecheck_err(state, rt.pos))?;
 
             envs.insert(x.clone(), src);
-            type_check_(state, envs, lin, linearizer, strict, t, trg)
+            type_check_(state, envs, lin, linearizer, strict, t, trg, typeenv)
         }
         Term::List(terms) => {
             let ty_elts = TypeWrapper::Ptr(new_var(state.table));
@@ -600,7 +607,7 @@ fn type_check_<S, E>(
                 .iter()
                 .enumerate()
                 .try_for_each(|(choice, t)| -> Result<(), TypecheckError> {
-                    type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, ty_elts.clone())
+                    type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, ty_elts.clone(), typeenv)
                 })
         }
         Term::Lbl(_) => {
@@ -610,18 +617,18 @@ fn type_check_<S, E>(
         }
         Term::Let(x, re, rt) => {
             let ty_let = binding_type(re.as_ref(), &envs, state.table, strict);
-            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Left), strict, re, ty_let.clone())?;
+            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Left), strict, re, ty_let.clone(), typeenv)?;
 
             // TODO move this up once lets are rec
             envs.insert(x.clone(), ty_let);
-            type_check_(state, envs, lin, linearizer, strict, rt, ty)
+            type_check_(state, envs, lin, linearizer, strict, rt, ty, typeenv)
         }
         Term::App(e, t) => {
             let src = TypeWrapper::Ptr(new_var(state.table));
             let arr = mk_tyw_arrow!(src.clone(), ty);
 
-            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Left), strict, e, arr)?;
-            type_check_(state, envs, lin, linearizer, strict, t, src)
+            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Left), strict, e, arr, typeenv)?;
+            type_check_(state, envs, lin, linearizer, strict, t, src, typeenv)
         }
         Term::Switch(exp, cases, default) => {
             // Currently, if it has a default value, we typecheck the whole thing as
@@ -629,12 +636,12 @@ fn type_check_<S, E>(
             let res = TypeWrapper::Ptr(new_var(state.table));
 
             for (choice, case) in cases.values().enumerate() {
-                type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, case, res.clone())?;
+                type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, case, res.clone(), typeenv)?;
             }
 
             let row = match default {
                 Some(t) => {
-                    type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Right),strict, t, res.clone())?;
+                    type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Right),strict, t, res.clone(), typeenv)?;
                     TypeWrapper::Ptr(new_var(state.table))
                 }
                 None => cases.iter().try_fold(
@@ -646,7 +653,7 @@ fn type_check_<S, E>(
             };
 
             unify(state, strict, ty, res).map_err(|err| err.into_typecheck_err(state, rt.pos))?;
-            type_check_(state, envs, lin, linearizer, strict, exp, mk_tyw_enum!(row))
+            type_check_(state, envs, lin, linearizer, strict, exp, mk_tyw_enum!(row), typeenv)
         }
         Term::Var(x) => {
             let x_ty = envs
@@ -675,7 +682,7 @@ fn type_check_<S, E>(
                 .iter()
                 .enumerate()
                 .try_for_each(|(choice, (_, t))| -> Result<(), TypecheckError> {
-                    type_check_(state, envs.clone(),lin , linearizer.scope(ScopeId::Choice(choice)), strict,t, ty_dyn.clone())
+                    type_check_(state, envs.clone(),lin , linearizer.scope(ScopeId::Choice(choice)), strict,t, ty_dyn.clone(), typeenv)
                 })?;
 
             unify(state, strict, ty, mk_typewrapper::dyn_record(ty_dyn))
@@ -704,7 +711,7 @@ fn type_check_<S, E>(
                     .iter()
                     .enumerate()
                     .try_for_each(|(choice, (_, t))| -> Result<(), TypecheckError> {
-                        type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, (*rec_ty).clone())
+                        type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, (*rec_ty).clone(), typeenv)
                     })
             } else {
                 let row = stat_map.iter().enumerate().try_fold(
@@ -719,7 +726,7 @@ fn type_check_<S, E>(
                             TypeWrapper::Ptr(new_var(state.table))
                         };
 
-                        type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, field, ty.clone())?;
+                        type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, field, ty.clone(), typeenv)?;
 
                         Ok(mk_tyw_row!((id.clone(), ty); acc))
                     },
@@ -734,15 +741,15 @@ fn type_check_<S, E>(
 
             unify(state, strict, ty, ty_res)
                 .map_err(|err| err.into_typecheck_err(state, rt.pos))?;
-            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Right),strict, t, ty_arg)
+            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Right),strict, t, ty_arg, typeenv)
         }
         Term::Op2(op, t1, t2) => {
             let (ty_arg1, ty_arg2, ty_res) = get_bop_type(state, op)?;
 
             unify(state, strict, ty, ty_res)
                 .map_err(|err| err.into_typecheck_err(state, rt.pos))?;
-            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Left), strict, t1, ty_arg1)?;
-            type_check_(state, envs, lin, linearizer, strict, t2, ty_arg2)
+            type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Left), strict, t1, ty_arg1, typeenv)?;
+            type_check_(state, envs, lin, linearizer, strict, t2, ty_arg2, typeenv)
         }
         Term::OpN(op, args) => {
             let (tys_op, ty_ret) = get_nop_type(state, op)?;
@@ -755,7 +762,7 @@ fn type_check_<S, E>(
                 .enumerate()
                 .zip(args.iter())
                 .try_for_each(|((choice, ty_t), t)| {
-                    type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, ty_t)?;
+                    type_check_(state, envs.clone(), lin, linearizer.scope(ScopeId::Choice(choice)), strict, t, ty_t, typeenv)?;
                     Ok(())
                 })?;
 
@@ -768,12 +775,20 @@ fn type_check_<S, E>(
             value: Some(t),
             ..
         }) => {
-            let tyw2 = TypeWrapper::from(ty2.clone());
+            let tyw2 = if let Types(AbsType::Var(type_ident)) = ty2 {
+                if let Some(replace_type) = typeenv.get(type_ident) {
+                    TypeWrapper::from(replace_type.clone())
+                } else {
+                    TypeWrapper::from(ty2.clone())
+                }
+            } else {
+                TypeWrapper::from(ty2.clone())
+            };
 
             let instantiated = instantiate_foralls(state, tyw2.clone(), ForallInst::Constant);
 
             unify(state, strict, tyw2, ty).map_err(|err| err.into_typecheck_err(state, rt.pos))?;
-            type_check_(state, envs, lin, linearizer, true, t, instantiated)
+            type_check_(state, envs, lin, linearizer, true, t, instantiated, typeenv)
         }
         // A metavalue with at least one contract is an assume. If there's several
         // contracts, we arbitrarily chose the first one as the type annotation.
@@ -791,7 +806,7 @@ fn type_check_<S, E>(
             // if there's an inner value, we have to recursively typecheck it, but in non strict
             // mode.
             if let Some(t) = value {
-                type_check_(state, envs, lin, linearizer, false, t, mk_typewrapper::dynamic())
+                type_check_(state, envs, lin, linearizer, false, t, mk_typewrapper::dynamic(), typeenv)
             }
             else {
                 Ok(())
@@ -799,10 +814,10 @@ fn type_check_<S, E>(
         }
         Term::Sym(_) => unify(state, strict, ty, mk_typewrapper::sym())
             .map_err(|err| err.into_typecheck_err(state, rt.pos)),
-        Term::Wrapped(_, t) => type_check_(state, envs, lin, linearizer, strict, t, ty),
+        Term::Wrapped(_, t) => type_check_(state, envs, lin, linearizer, strict, t, ty, typeenv),
         // A non-empty metavalue without a type or contract annotation is typechecked in the same way as its inner value
         Term::MetaValue(MetaValue { value: Some(t), .. }) => {
-            type_check_(state, envs, lin, linearizer, strict, t, ty)
+            type_check_(state, envs, lin, linearizer, strict, t, ty, typeenv)
         }
         // A metavalue without a body nor a type annotation is a record field without definition.
         // This should probably be non representable in the syntax, as it doesn't really make

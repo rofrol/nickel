@@ -5,6 +5,7 @@ use crate::parser::error::ParseError as InternalParseError;
 use crate::term::make as mk_term;
 use crate::term::Term::*;
 use crate::term::{BinaryOp, RichTerm, StrChunk, UnaryOp};
+use crate::types::TypeAliasEnv;
 use crate::{mk_app, mk_switch};
 use assert_matches::assert_matches;
 use codespan::Files;
@@ -13,7 +14,7 @@ fn parse(s: &str) -> Result<RichTerm, ParseError> {
     let id = Files::new().add("<test>", String::from(s));
 
     super::grammar::TermParser::new()
-        .parse(id, Lexer::new(&s))
+        .parse(id, &mut TypeAliasEnv::new(), Lexer::new(&s))
         .map_err(|err| ParseError::from_lalrpop(err, id))
 }
 

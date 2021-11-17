@@ -3,7 +3,7 @@ use crate::error::ImportError;
 use crate::eval::{Closure, Environment, IdentKind, Thunk};
 use crate::identifier::Ident;
 use crate::term::{Contract, RichTerm, Term};
-use crate::types::{AbsType, Types};
+use crate::types::{AbsType, TypeAliasEnv, Types};
 use codespan::FileId;
 use simple_counter::*;
 use std::path::PathBuf;
@@ -44,6 +44,7 @@ pub mod share_normal_form {
     use crate::identifier::Ident;
     use crate::position::TermPos;
     use crate::term::{MetaValue, RichTerm, Term};
+    use crate::types::TypeAliasEnv;
 
     /// Transform the top-level term of an AST to a share normal form, if it can.
     ///
@@ -53,7 +54,7 @@ pub mod share_normal_form {
     /// neither a record, a list nor an enriched value, it is returned the same.  In other words,
     /// the transformation is implemented as rewrite rules, and must be used in conjunction a
     /// traversal to obtain a full transformation.
-    pub fn transform_one(rt: RichTerm) -> RichTerm {
+    pub fn transform_one(rt: RichTerm, typeenv: &mut TypeAliasEnv) -> RichTerm {
         let RichTerm { term, pos } = rt;
         match *term {
             Term::Record(map, attrs) => {
@@ -222,10 +223,11 @@ pub mod import_resolution {
 pub mod apply_contracts {
     use super::{RichTerm, Term};
     use crate::mk_app;
+    use crate::types::{AbsType, TypeAliasEnv, Types};
 
     /// If the top-level node of the AST is a meta-value, apply the meta-value's contracts to the
     /// inner value.  Otherwise, return the term unchanged.
-    pub fn transform_one(rt: RichTerm) -> RichTerm {
+    pub fn transform_one(rt: RichTerm, typeenv: &mut TypeAliasEnv) -> RichTerm {
         let RichTerm { term, pos } = rt;
 
         match *term {
@@ -233,17 +235,30 @@ pub mod apply_contracts {
                 let inner = meta.types.iter().chain(meta.contracts.iter()).fold(
                     meta.value.take().unwrap(),
                     |acc, ctr| {
-                        mk_app!(
-                            ctr.types.clone().contract(),
-                            Term::Lbl(ctr.label.clone()),
-                            acc
-                        )
-                        .with_pos(pos)
+                        let (ctr_ty, ctr_lbl) =
+                            if let Types(AbsType::Var(ident)) = ctr.types.clone() {
+                                if let Some(ty_replace) = typeenv.get(&ident) {
+                                    (ty_replace, ctr.label.clone())
+                                } else {
+                                    (ctr.types.clone(), ctr.label.clone())
+                                }
+                            } else {
+                                (ctr.types.clone(), ctr.label.clone())
+                            };
+                        mk_app!(ctr_ty.contract(), Term::Lbl(ctr_lbl), acc).with_pos(pos)
                     },
                 );
 
                 meta.value.replace(inner);
                 RichTerm::new(Term::MetaValue(meta), pos)
+            }
+            v @ Term::TypeAlias(_, _) => {
+                if let Term::TypeAlias(id, ty) = v.clone() {
+                    typeenv.insert(id.clone(), ty.clone());
+                } else {
+                    panic!();
+                }
+                RichTerm::new(v, pos)
             }
             t => RichTerm::new(t, pos),
         }
@@ -267,13 +282,13 @@ struct ImportsResolutionState<'a, R> {
 /// or use the [`Cache`](../../cache/struct.Cache.html)
 pub fn transform(rt: RichTerm) -> RichTerm {
     rt.traverse(
-        &mut |rt: RichTerm, _| -> Result<RichTerm, ()> {
+        &mut |rt: RichTerm, typeenv| -> Result<RichTerm, ()> {
             // We need to do contract generation before wrapping stuff in variables
-            let rt = apply_contracts::transform_one(rt);
-            let rt = share_normal_form::transform_one(rt);
+            let rt = apply_contracts::transform_one(rt, typeenv);
+            let rt = share_normal_form::transform_one(rt, typeenv);
             Ok(rt)
         },
-        &mut (),
+        &mut TypeAliasEnv::new(),
     )
     .unwrap()
 }

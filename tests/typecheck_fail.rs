@@ -5,7 +5,7 @@ use nickel::error::TypecheckError;
 use nickel::parser::{grammar, lexer};
 use nickel::term::RichTerm;
 use nickel::typecheck::{type_check_in_env, Environment};
-use nickel::types::Types;
+use nickel::types::{TypeAliasEnv, Types};
 
 fn type_check(rt: &RichTerm) -> Result<Types, TypecheckError> {
     type_check_in_env(rt, &Environment::new(), &mut DummyResolver {})
@@ -16,7 +16,7 @@ fn type_check_expr(s: impl std::string::ToString) -> Result<Types, TypecheckErro
     let id = Files::new().add("<test>", s.clone());
     type_check(
         &grammar::TermParser::new()
-            .parse(id, lexer::Lexer::new(&s))
+            .parse(id, &mut TypeAliasEnv::new(), lexer::Lexer::new(&s))
             .unwrap(),
     )
 }

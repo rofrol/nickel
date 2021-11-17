@@ -6,6 +6,7 @@ use crate::position::TermPos;
 use crate::stdlib as nickel_stdlib;
 use crate::term::{RichTerm, Term};
 use crate::typecheck::{linearization::StubHost, type_check};
+use crate::types::TypeAliasEnv;
 use crate::{eval, parser, transformations};
 use codespan::{FileId, Files};
 use io::Read;
@@ -337,7 +338,7 @@ impl Cache {
         match format {
             InputFormat::Nickel => {
                 let t = parser::grammar::TermParser::new()
-                    .parse(file_id, Lexer::new(&buf))
+                    .parse(file_id, &mut TypeAliasEnv::new(), Lexer::new(&buf))
                     .map_err(|err| ParseError::from_lalrpop(err, file_id))?;
                 Ok(t)
             }
@@ -931,7 +932,7 @@ pub mod resolvers {
             } else {
                 let buf = self.files.source(file_id);
                 let term = parser::grammar::TermParser::new()
-                    .parse(file_id, Lexer::new(&buf))
+                    .parse(file_id, &mut TypeAliasEnv::new(), Lexer::new(&buf))
                     .map_err(|e| ParseError::from_lalrpop(e, file_id))
                     .map_err(|e| ImportError::ParseError(e, *pos))?;
                 self.term_cache.insert(file_id, term);
